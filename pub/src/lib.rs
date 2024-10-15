@@ -19,6 +19,8 @@ wit_bindgen::generate!({
     world: "process-v0",
 });
 
+// s123123123123132:callat:publisher.os
+
 const TIMER_PROCESS: &str = "timer:distro:sys";
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -72,6 +74,7 @@ impl PublisherState {
             }
         }
         // if not found/successfully deserialized, wait for init message.
+        // todo: add check of our_package = this_package
         loop {
             if let Ok(message) = await_message() {
                 if let Ok(req) = serde_json::from_slice::<InitPubRequest>(&message.body()) {
@@ -138,6 +141,11 @@ fn handle_request(req: PubSubRequest, source: &Address, state: &mut PublisherSta
                         .subscribers
                         .insert(source.clone(), SubscriberState::default());
                 }
+                // "topics1" "topics2"
+                // doria.kino nick.kino secret.kino
+                //
+                //  ~pub "topics2"
+                //
                 // todo:
                 // if we have stored some old message, and sub is not up to date, send those.
             }
