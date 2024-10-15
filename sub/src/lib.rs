@@ -3,10 +3,9 @@ use kinode_process_lib::{
     await_message, call_init, get_state, println, Address, Message, ProcessId, Request, Response,
 };
 use serde::{Deserialize, Serialize};
-use std::{collections::HashMap, str::FromStr};
+use std::{collections::HashSet, str::FromStr};
 
-mod pubsub;
-use pubsub::{HeartbeatResponse, HeartbeatStatus, InitSubRequest, PubSubRequest, PubSubResponse};
+use kinode::process::sub::{InitSubRequest, SubRequest, SubResponse};
 
 const TIMER_PROCESS: &str = "timer:distro:sys";
 
@@ -19,22 +18,21 @@ wit_bindgen::generate!({
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct SubscriberState {
-    subscriptions: HashMap<(Address, String), SubscriptionInfo>,
-    parent: Address,
+    subscription: Subscription,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
-pub struct SubscriptionInfo {
-    last_received_seq: u64,
-    // retain policy/config/similar stuff here?
+pub struct Subscription {
+    pub publisher: Address,
+    pub topic: String,
+    pub last_received_seq: u64,
+    pub parent: Address,
+    pub forward_to: HashSet<Address>,
 }
 
 impl SubscriberState {
-    pub fn new(parent: Address) -> Self {
-        SubscriberState {
-            subscriptions: HashMap::new(),
-            parent,
-        }
+    pub fn new(sub: Subscription) -> Self {
+        SubscriberState { subscription: sub }
     }
 
     pub fn load() -> Self {
@@ -47,54 +45,28 @@ impl SubscriberState {
         loop {
             if let Ok(message) = await_message() {
                 if let Ok(req) = serde_json::from_slice::<InitSubRequest>(&message.body()) {
-                    return SubscriberState::new(req.config.parent);
+                    if let Ok(parent) = Address::from_str(&req.parent) {
+                        if let Ok(publisher) = Address::from_str(&req.publisher) {
+                            let forward_to: Result<HashSet<Address>, _> = req
+                                .forward_to
+                                .into_iter()
+                                .map(|addr_str| Address::from_str(&addr_str))
+                                .collect();
+                            if let Ok(forward_to) = forward_to {
+                                return SubscriberState::new(Subscription {
+                                    publisher,
+                                    topic: req.topic,
+                                    last_received_seq: req.from_sequence.unwrap_or(0),
+                                    parent,
+                                    forward_to,
+                                });
+                            }
+                        }
+                    }
                 }
             }
         }
     }
-
-    pub fn update_sequence(
-        &mut self,
-        publisher: &Address,
-        topic: &str,
-        sequence: u64,
-    ) -> Result<()> {
-        let subscription = self
-            .subscriptions
-            .get_mut(&(publisher.clone(), topic.to_string()))
-            .ok_or_else(|| {
-                anyhow::anyhow!(
-                    "Not subscribed to topic '{}' from publisher {:?}",
-                    topic,
-                    publisher
-                )
-            })?;
-
-        if sequence > subscription.last_received_seq {
-            subscription.last_received_seq = sequence;
-        }
-        Ok(())
-    }
-
-    pub fn acknowledge(&mut self, publisher: &Address, topic: &str, sequence: u64) -> Result<()> {
-        let subscription = self
-            .subscriptions
-            .get_mut(&(publisher.clone(), topic.to_string()))
-            .ok_or_else(|| {
-                anyhow::anyhow!(
-                    "Not subscribed to topic '{}' from publisher {:?}",
-                    topic,
-                    publisher
-                )
-            })?;
-
-        if sequence > subscription.last_received_seq {
-            subscription.last_received_seq = sequence;
-        }
-        Ok(())
-    }
-
-    // todo: implement save, resubscribe
 }
 
 fn handle_message(message: Message, state: &mut SubscriberState) -> Result<()> {
@@ -107,93 +79,50 @@ fn handle_message(message: Message, state: &mut SubscriberState) -> Result<()> {
     }
 
     if message.is_request() {
-        let req: PubSubRequest = serde_json::from_slice(&message.body())?;
+        let req: SubRequest = serde_json::from_slice(&message.body())?;
         handle_request(req, message.source(), state)?;
     } else {
-        let res: PubSubResponse = serde_json::from_slice(&message.body())?;
+        // MIght not even need this.
+        let res: SubResponse = serde_json::from_slice(&message.body())?;
         handle_response(res, message.source(), state)?;
     }
 
     Ok(())
 }
 
-fn handle_request(req: PubSubRequest, source: &Address, state: &mut SubscriberState) -> Result<()> {
-    match req {
-        PubSubRequest::Subscribe(sub_req) => {
-            if source == &state.parent {
-                for topic in &sub_req.topics {
-                    state.subscriptions.insert(
-                        (sub_req.target.clone(), topic.clone()),
-                        SubscriptionInfo {
-                            last_received_seq: 0,
-                        },
+fn handle_request(req: SubRequest, source: &Address, state: &mut SubscriberState) -> Result<()> {
+    // this only handles unsubscribe requests for now, which also shut down the worker.
+    // subscribe requests are handled in the initialization.
+    match &req {
+        SubRequest::Unsubscribe(unsub) => {
+            if source == &state.subscription.parent {
+                if state.subscription.topic == unsub.topic {
+                    // return error too?
+                    println!(
+                        "parent tried to unsubscribe from unknown topic: {}, have topic {}",
+                        unsub.topic, state.subscription.topic
                     );
                 }
-
-                Request::to(&sub_req.target)
-                    .body(serde_json::to_vec(&sub_req)?)
+                Request::to(&state.subscription.publisher)
+                    .body(serde_json::to_vec(&req)?)
                     .send()?;
-            }
-        }
-        PubSubRequest::Unsubscribe(unsub_req) => {
-            if source == &state.parent {
-                for topic in &unsub_req.topics {
-                    state
-                        .subscriptions
-                        .remove(&(unsub_req.target.clone(), topic.clone()));
-                }
-                Request::to(&unsub_req.target)
-                    .body(serde_json::to_vec(&unsub_req)?)
-                    .send()?;
-            }
-        }
-        PubSubRequest::Publish(pub_msg) => {
-            // check if we have an active subscription to this publisher/topic
-            if let Some(_subscription) = state
-                .subscriptions
-                .get_mut(&(source.clone(), pub_msg.topic.clone()))
-            {
-                // inherit the published content from the message blob
-                state.update_sequence(source, &pub_msg.topic, pub_msg.sequence)?;
 
-                // note: this should also send a message response.
-                state.acknowledge(source, &pub_msg.topic, pub_msg.sequence)?;
-                // todo: inherit bytes and send to parent
+                // Note! also return boolean, so that this process can exit!
+                // also note.. it'll restart upon boot. figure that out.
+                // perhaps need some state in the lib struct that'll manage this
+                // but we need that anyway I feel like.
             }
-        }
-        // NOTE: heartbeat should include topic?
-        PubSubRequest::Heartbeat(_heartbeat) => {
-            let heartbeat_resp = PubSubResponse::Heartbeat(HeartbeatResponse {
-                timestamp: std::time::SystemTime::now()
-                    .duration_since(std::time::UNIX_EPOCH)
-                    .expect("Time went backwards")
-                    .as_secs(),
-                status: HeartbeatStatus::Ok,
-            });
-            Response::new()
-                .body(serde_json::to_vec(&heartbeat_resp)?)
-                .send()?;
         }
         _ => {}
     }
     Ok(())
 }
 
-fn handle_response(
-    res: PubSubResponse,
-    source: &Address,
-    state: &mut SubscriberState,
-) -> Result<()> {
-    match res {
-        PubSubResponse::Subscribe(sub_resp) => {
-            // might not need this if we send_and_await the original sub req.
-        }
-        PubSubResponse::Unsubscribe(unsub_resp) => {
-            // might not need this if we send_and_await the original unsub req.
-        }
-        _ => {}
-    }
-
+fn handle_response(res: SubResponse, source: &Address, state: &mut SubscriberState) -> Result<()> {
+    // ping/pongs here?
+    // needed? maybe just online checks..
+    // but that's for the entire node? from the publisher side or no?
+    // might need ping and pongs.
     Ok(())
 }
 
@@ -207,6 +136,11 @@ fn init(our: Address) {
     // networking yes. but publisher can be public.
     // so this just needs the messaging cap back to parent process.
     let mut state = SubscriberState::load();
+
+    // loaded state (got init config and subscription)
+    // now, send subscribe request to publisher.
+
+    // wait and then confirm, fire into loop?
 
     loop {
         match await_message() {

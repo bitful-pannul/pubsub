@@ -1,56 +1,8 @@
-interface pub {
-
-    variant pub-request {
-        init-pub(init-pub-request),
-        publish(publish-request),
-    }
-
+interface common {
     record publish-request {
         topic: string,
         sequence: u64,
         // payload: as blob
-    }
-
-    // Initialize request
-    record init-pub-request {
-        config: pub-config,
-    }
-
-    /// Config for publications
-    record pub-config {
-        max-retry-attempts: u32,          // default 3
-        retry-interval: u64,              // default 120 seconds
-        heartbeat-interval: u64,          // default 60 seconds
-        default-persistence: persistence, // default memory(1000)
-    }
-
-    /// Persistence options for publications.
-    variant persistence {
-        none,         // ephemeral, fire and forget.
-        memory(u64),  // in memory, max_length.
-        disk(u64),    // on disk, max_length.
-    }
-}
-
-interface sub {
-    variant sub-request {
-        init-sub(init-sub-request),
-        subscribe(subscribe-request),
-        ping,
-    }
-
-    variant sub-response {
-        subscribe(subscribe-response),
-        unsubscribe(unsubscribe-response),
-        pong,
-    }
-
-    record init-sub-request {
-        config: sub-config,
-    }
-
-    record sub-config {
-        parent: string,
     }
 
     record subscribe-request {
@@ -80,8 +32,66 @@ interface sub {
     }
 }
 
+interface pub {
+    use common.{publish-request, subscribe-request, subscribe-response, unsubscribe-request};
+
+    variant pub-request {
+        init-pub(init-pub-request),
+        publish(publish-request),
+        subscribe(subscribe-request),
+        unsubscribe(unsubscribe-request)
+    }
+
+    // Initialize request
+    record init-pub-request {
+        topic: string,
+        config: pub-config,
+    }
+
+    /// Config for publications
+    record pub-config {
+        max-retry-attempts: u32,          // default 3
+        retry-interval: u64,              // default 120 seconds
+        heartbeat-interval: u64,          // default 60 seconds
+        default-persistence: persistence, // default memory(1000)
+    }
+
+    /// Persistence options for publications.
+    variant persistence {
+        none,         // ephemeral, fire and forget.
+        memory(u64),  // in memory, max_length.
+        disk(u64),    // on disk, max_length.
+    }
+}
+
+interface sub {
+    use common.{subscribe-request, subscribe-response, unsubscribe-request, unsubscribe-response, heartbeat};
+
+    variant sub-request {
+        init-sub(init-sub-request),
+        subscribe(subscribe-request),
+        unsubscribe(unsubscribe-request),
+        ping,
+    }
+
+    variant sub-response {
+        subscribe(subscribe-response),
+        unsubscribe(unsubscribe-response),
+        pong,
+    }
+
+    record init-sub-request {
+        parent: string,
+        forward-to: list<string>,
+        publisher: string,
+        topic: string,
+        from-sequence: option<u64>,
+    }
+}
+
 world pubsub-template-os-v0 {
     import pub;
     import sub;
+    import common;
     include process-v0;
 }

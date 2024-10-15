@@ -3,15 +3,11 @@ use kinode_process_lib::{
     await_message, call_init, get_state, println, Address, Message, ProcessId, Request, Response,
 };
 use serde::{Deserialize, Serialize};
-use std::{
-    collections::{HashMap, HashSet},
-    str::FromStr,
-    time::Duration,
-};
+use std::{collections::HashSet, str::FromStr};
 
-mod pubsub;
-use pubsub::{
-    InitPubRequest, Persistence, PubSubRequest, PubSubResponse, PublisherConfig, SubscribeResponse,
+use kinode::process::{
+    common::SubscribeResponse,
+    pub_::{InitPubRequest, Persistence, PubConfig, PubRequest, PublishRequest},
 };
 
 wit_bindgen::generate!({
@@ -25,46 +21,31 @@ wit_bindgen::generate!({
 
 const TIMER_PROCESS: &str = "timer:distro:sys";
 
+// todo: figure out restart/state situation! especially if exit situation! :)
+//       also, do try out exit:: with restart functionality especially here.
+//       in the subscriber, probably not possible.
+
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct PublisherState {
-    topics: HashMap<String, TopicState>,
-    config: PublisherConfig,
-    parent: Address,
-}
-
-#[derive(Debug, Clone, Serialize, Deserialize)]
-pub struct TopicState {
-    persistence: Persistence, // note: could be in config too, making it topic-wide.
+    topic: String,
     last_sequence: u64,
-    subscribers: HashMap<Address, SubscriberState>,
-}
-
-#[derive(Debug, Clone, Serialize, Deserialize)]
-pub struct SubscriberState {
-    last_acked_sequence: u64,
-    pending_acks: HashMap<u64, RetryInfo>,
-}
-
-#[derive(Debug, Clone, Serialize, Deserialize)]
-pub struct RetryInfo {
-    retry_count: u32,
-    last_sent: u64, // unix timestamp?
-}
-
-impl Default for SubscriberState {
-    fn default() -> Self {
-        SubscriberState {
-            last_acked_sequence: 0,
-            pending_acks: HashMap::new(),
-        }
-    }
+    subscribers: HashSet<Address>,
+    offline_subscribers: HashSet<(Address, u64)>, // (address, retry_count)
+    config: PubConfig,
+    parent: Address,
+    // add vector of messages (or last_sequence numbers!)
+    // if in memory, just store the values (veqdeque or hashmap?)
+    // if disk, do the same but the values are pointers to keys?
 }
 
 impl PublisherState {
-    pub fn new(config: PublisherConfig, parent: &Address) -> Self {
+    pub fn new(config: PubConfig, parent: &Address, topic: String) -> Self {
         PublisherState {
-            topics: HashMap::new(),
+            topic,
             config,
+            last_sequence: 0,
+            subscribers: HashSet::new(), // what about an initial subscription list?
+            offline_subscribers: HashSet::new(), // then it's more similar to gossip
             parent: parent.clone(),
         }
     }
@@ -80,36 +61,9 @@ impl PublisherState {
         loop {
             if let Ok(message) = await_message() {
                 if let Ok(req) = serde_json::from_slice::<InitPubRequest>(&message.body()) {
-                    return Self::new(req.config, message.source());
+                    return Self::new(req.config, message.source(), req.topic);
                 }
             }
-        }
-    }
-}
-
-impl Default for PublisherConfig {
-    fn default() -> Self {
-        PublisherConfig {
-            max_retry_attempts: 3,
-            heartbeat_interval: Duration::from_secs(30),
-            default_persistence: Persistence::Memory { max_length: 1000 },
-            retry_interval: Duration::from_secs(120),
-        }
-    }
-}
-
-impl PublisherConfig {
-    pub fn new(
-        max_retry_attempts: u32,
-        heartbeat_interval: Duration,
-        default_persistence: Persistence,
-        retry_interval: Duration,
-    ) -> Self {
-        PublisherConfig {
-            max_retry_attempts,
-            heartbeat_interval,
-            default_persistence,
-            retry_interval,
         }
     }
 }
@@ -124,129 +78,93 @@ fn handle_message(message: Message, state: &mut PublisherState) -> Result<()> {
     }
 
     if message.is_request() {
-        let req: PubSubRequest = serde_json::from_slice(&message.body())?;
+        let req: PubRequest = serde_json::from_slice(&message.body())?;
         handle_request(req, message.source(), state)?;
     } else {
-        let res: PubSubResponse = serde_json::from_slice(&message.body())?;
-        handle_response(res, message.source(), state)?;
+        // not sure if we need this.
+        // maybe as a PONG response...
+        // let res: PubSubResponse = serde_json::from_slice(&message.body())?;
+        // handle_response(res, message.source(), state)?;
     }
 
     Ok(())
 }
 
-fn handle_request(req: PubSubRequest, source: &Address, state: &mut PublisherState) -> Result<()> {
+fn handle_request(req: PubRequest, source: &Address, state: &mut PublisherState) -> Result<()> {
     match req {
-        PubSubRequest::Subscribe(sub_req) => {
-            for topic in &sub_req.topics {
-                if let Some(topic_state) = state.topics.get_mut(topic) {
-                    topic_state
-                        .subscribers
-                        .insert(source.clone(), SubscriberState::default());
-                }
-                // "topics1" "topics2"
-                // doria.kino nick.kino secret.kino
-                //
-                //  ~pub "topics2"
-                //
-                // todo:
-                // if we have stored some old message, and sub is not up to date, send those.
-            }
+        PubRequest::Subscribe(sub_req) => {
+            let (success, error) = if state.topic == sub_req.topic {
+                state.subscribers.insert(source.clone());
+                (true, None)
+            } else {
+                (
+                    false,
+                    Some(format!(
+                        "error: publisher does not have requested topic: {}, has: {}",
+                        sub_req.topic, state.topic
+                    )),
+                )
+            };
             let res = SubscribeResponse {
-                success: true,
-                topics: sub_req.topics,
-                error: None,
+                success,
+                topic: sub_req.topic,
+                error,
             };
             Response::new().body(serde_json::to_vec(&res)?).send()?;
         }
-        PubSubRequest::Unsubscribe(unsub_req) => {
-            for topic in &unsub_req.topics {
-                if let Some(topic_state) = state.topics.get_mut(topic) {
-                    topic_state.subscribers.remove(&source.clone());
-                }
-            }
-            // TODO: add UnsubscribeResponse
+        PubRequest::Unsubscribe(unsub_req) => {
+            let (success, error) = if state.topic == unsub_req.topic {
+                state.subscribers.remove(source);
+                (true, None)
+            } else {
+                (
+                    false,
+                    Some(format!(
+                        "error: publisher does not have requested topic: {}, has: {}",
+                        unsub_req.topic, state.topic
+                    )),
+                )
+            };
             let res = SubscribeResponse {
-                success: true,
-                topics: unsub_req.topics,
-                error: None,
+                success,
+                topic: unsub_req.topic,
+                error,
             };
             Response::new().body(serde_json::to_vec(&res)?).send()?;
         }
-        PubSubRequest::Publish(pub_msg) => {
+        PubRequest::Publish(mut pub_msg) => {
             if source == &state.parent {
                 // 1. Fetch and increment sequence number
-                let new_seq = {
-                    let topic_state =
-                        state
-                            .topics
-                            .entry(pub_msg.topic.clone())
-                            .or_insert_with(|| TopicState {
-                                persistence: state.config.default_persistence.clone(),
-                                last_sequence: 0,
-                                subscribers: HashMap::new(),
-                            });
-                    topic_state.last_sequence += 1;
-                    topic_state.last_sequence
-                };
+                state.last_sequence += 1;
+                let new_seq = state.last_sequence;
 
                 // store message (if persistence is enabled)
                 // TODO: implement message storage based on persistence configuration
 
                 // distribute to subscribers!
-                if let Some(topic_state) = state.topics.get_mut(&pub_msg.topic) {
-                    let current_time = std::time::SystemTime::now()
-                        .duration_since(std::time::UNIX_EPOCH)
-                        .unwrap()
-                        .as_secs();
+                pub_msg.sequence = new_seq;
+                let req = PubRequest::Publish(pub_msg);
 
-                    for (subscriber, sub_state) in &mut topic_state.subscribers {
-                        // update pending_acks
-                        sub_state.pending_acks.insert(
-                            new_seq,
-                            RetryInfo {
-                                retry_count: 0,
-                                last_sent: current_time,
-                            },
-                        );
-
-                        // Create a new PubSubRequest for each subscriber
-                        let req = PubSubRequest::Publish(pub_msg.clone());
-
-                        Request::to(subscriber)
-                            .body(serde_json::to_vec(&req)?)
-                            .inherit(true)
-                            .send()?;
-                    }
+                for subscriber in &state.subscribers {
+                    Request::to(subscriber)
+                        .body(serde_json::to_vec(&req)?)
+                        .inherit(true)
+                        .send()?;
                 }
             }
-        }
-        PubSubRequest::Acknowledge(ack) => {
-            if let Some(topic_state) = state.topics.get_mut(&ack.topic) {
-                if let Some(subscriber_state) = topic_state.subscribers.get_mut(&source) {
-                    subscriber_state.last_acked_sequence = ack.sequence;
-                    subscriber_state.pending_acks.remove(&ack.sequence);
-                }
-            }
-        }
-        PubSubRequest::Heartbeat(heartbeat) => {
-            // 1. Update subscriber's last heartbeat
-            // 2. Return HeartbeatResponse
         }
         _ => {}
     }
     Ok(())
 }
 
-fn handle_response(
-    res: PubSubResponse,
-    source: &Address,
-    state: &mut PublisherState,
-) -> Result<()> {
+// might not need at all.
+fn handle_response(res: PubRequest, source: &Address, state: &mut PublisherState) -> Result<()> {
     Ok(())
 }
 
 call_init!(init);
-fn init(our: Address) {
+fn init(_our: Address) {
     println!("pub init");
 
     // upon init, publisher checks for a saved state+config,
