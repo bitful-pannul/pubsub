@@ -5,11 +5,6 @@ use std::{
     time::Duration,
 };
 
-wit_bindgen::generate!({
-    path: "target/wit",
-    world: "process-v0",
-});
-
 // main library helper struct
 
 // let fly = PubSub::new(None);

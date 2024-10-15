@@ -5,11 +5,6 @@ use std::{
     time::Duration,
 };
 
-wit_bindgen::generate!({
-    path: "target/wit",
-    world: "process-v0",
-});
-
 /// Publisher Config
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct PublisherConfig {

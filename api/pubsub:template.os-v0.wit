@@ -1,0 +1,87 @@
+interface pub {
+
+    variant pub-request {
+        init-pub(init-pub-request),
+        publish(publish-request),
+    }
+
+    record publish-request {
+        topic: string,
+        sequence: u64,
+        // payload: as blob
+    }
+
+    // Initialize request
+    record init-pub-request {
+        config: pub-config,
+    }
+
+    /// Config for publications
+    record pub-config {
+        max-retry-attempts: u32,          // default 3
+        retry-interval: u64,              // default 120 seconds
+        heartbeat-interval: u64,          // default 60 seconds
+        default-persistence: persistence, // default memory(1000)
+    }
+
+    /// Persistence options for publications.
+    variant persistence {
+        none,         // ephemeral, fire and forget.
+        memory(u64),  // in memory, max_length.
+        disk(u64),    // on disk, max_length.
+    }
+}
+
+interface sub {
+    variant sub-request {
+        init-sub(init-sub-request),
+        subscribe(subscribe-request),
+        ping,
+    }
+
+    variant sub-response {
+        subscribe(subscribe-response),
+        unsubscribe(unsubscribe-response),
+        pong,
+    }
+
+    record init-sub-request {
+        config: sub-config,
+    }
+
+    record sub-config {
+        parent: string,
+    }
+
+    record subscribe-request {
+        topic: string,
+        from-sequence: option<u64>,
+    }
+
+    record unsubscribe-request {
+        topic: string,
+    }
+
+    record subscribe-response {
+        success: bool,
+        topic: string,
+        error: option<string>,
+    }
+
+    record unsubscribe-response {
+        success: bool,
+        topic: string,
+        error: option<string>,
+    }
+
+    enum heartbeat {
+        ping,
+        pong,
+    }
+}
+
+world pubsub-template-os-v0 {
+    import pub;
+    import sub;
+    include process-v0;
+}

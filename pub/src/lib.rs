@@ -16,7 +16,9 @@ use pubsub::{
 
 wit_bindgen::generate!({
     path: "target/wit",
-    world: "process-v0",
+    world: "pubsub-template-os-v0",
+    generate_unused_types: true,
+    additional_derives: [PartialEq, serde::Deserialize, serde::Serialize],
 });
 
 // s123123123123132:callat:publisher.os
