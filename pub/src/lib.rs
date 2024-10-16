@@ -10,6 +10,8 @@ use kinode::process::{
     pub_::{InitPubRequest, Persistence, PubConfig, PubRequest, PublishRequest},
 };
 
+mod pubsub;
+
 wit_bindgen::generate!({
     path: "target/wit",
     world: "pubsub-template-os-v0",

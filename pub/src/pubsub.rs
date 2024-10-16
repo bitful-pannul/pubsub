@@ -1,186 +1,328 @@
-use kinode_process_lib::Address;
-use serde::{Deserialize, Serialize};
-use std::{
-    collections::{HashMap, HashSet},
-    time::Duration,
+use anyhow::Result;
+use kinode_process_lib::{
+    our_capabilities, spawn, Address, LazyLoadBlob, OnExit, PackageId, ProcessId, Request,
 };
+use serde::{Deserialize, Serialize};
+use std::collections::{HashMap, HashSet};
+use std::str::FromStr;
+
+use crate::kinode::process::common::UnsubscribeRequest;
+use crate::kinode::process::pub_::{
+    InitPubRequest, Persistence, PubConfig, PubRequest, PublishRequest,
+};
+use crate::kinode::process::sub::{InitSubRequest, SubRequest, SubResponse};
 
 // main library helper struct
 
-// let fly = PubSub::new(None);
-
-// fly.pub("topic1", b"hello there");
-//
-
-// fly.sub("topic1", "doria.kino".into());
 //
 //
-
-// req.metadata() .metadata() .context()
+//
+// let config = PubConfig::def
+// let pub = Pub::new();
+//
+// let topic = pub.new_topic("my-posts", config::Default());
+//
+// let topic = pub.get_topic("my-posts");
+// topic.publish(b"hello there")?;
+//
+// pub.publish("my-posts", b"hello there")?;
+//
+//
 //
 
-// req => {
-//   // !!!notSend_and_await
-// req::to().send()
-// }
+// let sub = Sub::new();
+// let posts = sub.subscribe("posts", "doria.kino");
+// sub.subscribe("posts", "doria.kino");
+//
+// sub.subcribe_from("posts", 100);
+//
+// sub.unsubscribe("posts", "doria.kino"); // dropped etc
+//
 //
 //
 
 // handle_incoming_sub() -> {
 // }
 
+#[derive(Debug, Clone, Serialize, Deserialize)]
 #[allow(unused)]
-pub struct PubSub {
-    subscriptions: HashMap<(Address, String), u64>, // (publisher, topic) -> sequence (do we need this)
+pub struct Pub {
+    publishers: HashMap<String, Publisher>, // topic, metadata
+    our: Address,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct Publisher {
+    pub address: Address,
+    pub config: PubConfig,
 }
 
 #[allow(unused)]
-impl PubSub {
-    pub fn new() -> Self {
-        // spawn pub + sub process. (read from predictable)
-        PubSub {
-            subscriptions: HashMap::new(),
+impl Pub {
+    pub fn new(our: &Address) -> Self {
+        // load in state of previous publishers here?
+        // save state to kv? because it's being used as a library...
+        Pub {
+            publishers: HashMap::new(),
+            our: our.clone(),
         }
     }
 
-    pub fn get_subscribed_topics(&self) -> HashSet<(Address, String)> {
-        self.subscriptions.keys().cloned().collect()
+    pub fn new_topic(&mut self, topic: &str, config: PubConfig) -> Result<(), PubError> {
+        // spawn new publisher process
+
+        // TODO: implement more granular capabilities, not just passing all from parent.
+        //
+        let our_caps = our_capabilities();
+        let process_name = format!("pub-{}", topic);
+        let wasm_path = format!("{}/pkg/pub.wasm", self.our.package_id());
+        let process = spawn(
+            Some(&process_name),
+            &wasm_path,
+            OnExit::Restart,
+            our_caps,
+            vec![],
+            true,
+        )
+        .map_err(|e| PubError::SpawningError(e.to_string()))?;
+        let publisher_address = Address::new(self.our.node.clone(), process);
+
+        // send pub info to new process
+        let init_pub_request = InitPubRequest {
+            topic: topic.to_string(),
+            config: config,
+        };
+        Request::to(&publisher_address)
+            .body(serde_json::to_vec(&init_pub_request).unwrap())
+            .send()
+            .unwrap();
+
+        let publisher = Publisher {
+            address: publisher_address,
+            config: config,
+        };
+
+        self.publishers.insert(topic.to_string(), publisher);
+        Ok(())
     }
 
-    pub fn get_last_sequence(&self, publisher: &Address, topic: &str) -> Option<u64> {
-        self.subscriptions
-            .get(&(publisher.clone(), topic.to_string()))
-            .cloned()
+    pub fn get_topic(&self, topic: &str) -> Option<&Publisher> {
+        self.publishers.get(topic)
+    }
+
+    pub fn publish(&mut self, topic: &str, message: &[u8]) -> Result<(), PubError> {
+        if let Some(publisher) = self.publishers.get(topic) {
+            let publish_message = PubRequest::Publish(PublishRequest {
+                topic: topic.to_string(),
+                sequence: 0,
+            });
+
+            Request::to(&publisher.address)
+                .body(serde_json::to_vec(&publish_message).unwrap())
+                .blob_bytes(message)
+                .send()
+                .unwrap();
+            Ok(())
+        } else {
+            // this is config specific almost.
+            // if you already don't have a publisher, do we spawn one?
+            // leads to default config... which might not be what you want.
+            // default config could also be stored and set in the api!
+            self.new_topic(topic, PubConfig::default())?;
+            self.publish(topic, message)?;
+            // NOTE: this could be a topic.publish instead! to avoid infinite loops or something..?
+            Ok(())
+        }
+    }
+    /// todo:: implement killing of the process.
+    pub fn remove_topic(&mut self, topic: &str) -> Result<(), PubError> {
+        if let Some(publisher) = self.publishers.get(topic) {
+            Request::to(&publisher.address)
+                .body(b"kill")
+                .send()
+                .unwrap();
+        }
+        Ok(())
     }
 }
 
-/// Publisher Config
-#[derive(Debug, Clone, Serialize, Deserialize)]
-pub struct PublisherConfig {
-    pub max_retry_attempts: u32,          // default 3
-    pub retry_interval: Duration,         // default 2 minutes
-    pub heartbeat_interval: Duration,     // default 30 seconds,
-    pub default_persistence: Persistence, // default Memory { max_length: 1000 }
+impl Default for PubConfig {
+    fn default() -> Self {
+        PubConfig {
+            max_retry_attempts: 3,
+            retry_interval: 120,
+            heartbeat_interval: 60,
+            default_persistence: Persistence::Memory(1000),
+        }
+    }
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
-pub enum Persistence {
-    None,                         // retains no messages, fire and forget.
-    Memory { max_length: usize }, // retains max_length of messages in memory.
-    Disk { max_length: usize },   // retains max_length of messages on disk in key value store.
-                                  // pub:package_id:publisher_id
-                                  // sub:package_id:subscriber_id
+#[allow(unused)]
+pub struct Sub {
+    subscriptions: HashMap<Subscription, Subscriber>, // (publisher, topic) -> sequence (do we need this)
+    our: Address,
+    // could also have topic -> (publisher, sequence)...
+    // different lib or optimization here?
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, Eq, PartialEq, Hash)]
+pub struct Subscription {
+    publisher: Address, // publisher worker address
+    topic: String,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
-pub enum PubSubRequest {
-    InitPub(InitPubRequest),
-    InitSub(InitSubRequest),
-    Subscribe(SubscribeRequest),
-    Unsubscribe(UnsubscribeRequest),
-    Publish(PublishMessage),
-    //
-    //
-    // maybe these are unnecesary
-    Acknowledge(Ack),
-    FetchMessages(FetchMessagesRequest), // maybe remove.
-    Heartbeat(Heartbeat),
+pub struct Subscriber {
+    address: Address,     // subscriber workers address
+    latest_sequence: u64, // latest sequence number received (pain to keep up to date?)
+}
+
+#[allow(unused)]
+impl Sub {
+    pub fn new(our: &Address) -> Self {
+        Sub {
+            subscriptions: HashMap::new(),
+            our: our.clone(),
+        }
+    }
+
+    pub fn subscribe_from<T: Into<PackageId>>(
+        &mut self,
+        topic: &str,
+        publisher_pkg: T,
+        node: &str,
+        sequence: Option<u64>,
+    ) -> Result<(), SubError> {
+        let publisher_pkg = publisher_pkg.into();
+        let publisher_process = ProcessId::from((
+            format!("pub-{}", topic).as_str(),
+            publisher_pkg.package_name.as_str(),
+            publisher_pkg.publisher_node.as_str(),
+        ));
+
+        let publisher = Address::new(node.to_string(), publisher_process);
+
+        let subscription = Subscription {
+            publisher: publisher.clone(),
+            topic: topic.to_string(),
+        };
+
+        if self.subscriptions.contains_key(&subscription) {
+            // we have a sequence already.. resubscribe?
+            return Ok(());
+        }
+
+        // TODO: more granular caps.
+        let our_caps = our_capabilities();
+
+        // we spawn a subscriber.
+        let wasm_path = format!("{}/pkg/sub.wasm", self.our.package_id());
+        // TODO: needs ability to message its parent? //networking?
+        let process = spawn(None, &wasm_path, OnExit::Restart, our_caps, vec![], false)
+            .map_err(|e| SubError::SpawningError(e.to_string()))?;
+
+        let subscriber_address = Address::new(self.our.node.clone(), process);
+
+        let sub_init = SubRequest::InitSub(InitSubRequest {
+            topic: topic.to_string(),
+            parent: self.our.to_string(),
+            forward_to: vec![],
+            publisher: publisher.to_string(),
+            from_sequence: sequence,
+        });
+
+        let res = Request::to(&subscriber_address)
+            .body(serde_json::to_vec(&sub_init).unwrap())
+            .send_and_await_response(5)
+            .unwrap()
+            .map_err(|e| SubError::SubInitError(e.to_string()))?;
+
+        let sub_response = serde_json::from_slice::<SubResponse>(&res.body())
+            .map_err(|e| SubError::SerializeError(e.to_string()))?;
+
+        if let SubResponse::Subscribe(sub) = sub_response {
+            println!("init_sub response: {:?}", sub);
+
+            if !sub.success {
+                return Err(SubError::SubInitError(sub.error.unwrap_or_default()));
+            }
+
+            let subscriber = Subscriber {
+                address: subscriber_address,
+                latest_sequence: sequence.unwrap_or(0),
+            };
+
+            self.subscriptions.insert(subscription, subscriber);
+        } else {
+            return Err(SubError::SerializeError(
+                "Not a SubscribeResponse".to_string(),
+            ));
+        }
+
+        Ok(())
+    }
+
+    pub fn subscribe<T: Into<PackageId>>(
+        &mut self,
+        topic: &str,
+        publisher_pkg: T,
+        node: &str,
+    ) -> Result<(), SubError> {
+        self.subscribe_from(topic, publisher_pkg, node, None)
+    }
+
+    pub fn unsubscribe<T: Into<PackageId>>(
+        &mut self,
+        topic: &str,
+        publisher_pkg: T,
+        node: &str,
+    ) -> Result<(), SubError> {
+        let publisher_pkg = publisher_pkg.into();
+        let publisher_process = ProcessId::from((
+            format!("pub-{}", topic).as_str(),
+            publisher_pkg.package_name.as_str(),
+            publisher_pkg.publisher_node.as_str(),
+        ));
+
+        let publisher = Address::new(node.to_string(), publisher_process);
+
+        let subscription = Subscription {
+            publisher,
+            topic: topic.to_string(),
+        };
+
+        if let Some(subscriber) = self.subscriptions.remove(&subscription) {
+            // Send an unsubscribe request to the subscriber process
+            let unsub_request = SubRequest::Unsubscribe(UnsubscribeRequest {
+                topic: topic.to_string(),
+            });
+            Request::to(&subscriber.address)
+                .body(serde_json::to_vec(&unsub_request).unwrap())
+                .send()
+                .map_err(|e| SubError::UnsubscribeError(e.to_string()))?;
+
+            Ok(())
+        } else {
+            Err(SubError::SubscriptionNotFound)
+        }
+    }
+}
+
+// Error types
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub enum PubError {
+    TopicNotFound,
+    SpawningError(String),
+    NoPublisherProcessFound(String),
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
-pub enum PubSubResponse {
-    Subscribe(SubscribeResponse),
-    Unsubscribe(UnsubscribeResponse),
-    FetchMessages(FetchMessagesResponse),
-    Heartbeat(HeartbeatResponse),
-}
-
-#[derive(Debug, Clone, Serialize, Deserialize)]
-pub struct InitPubRequest {
-    pub config: PublisherConfig,
-}
-
-#[derive(Debug, Clone, Serialize, Deserialize)]
-pub struct InitSubRequest {
-    pub config: SubscriberConfig,
-}
-
-#[derive(Debug, Clone, Serialize, Deserialize)]
-pub struct SubscriberConfig {
-    pub parent: Address,
-}
-
-#[derive(Debug, Clone, Serialize, Deserialize)]
-pub struct SubscribeRequest {
-    pub target: Address, // note see if target is publisher or a subscriber, tailor
-    pub topics: Vec<String>,
-    pub from_sequence: Option<u64>,
-}
-
-#[derive(Debug, Clone, Serialize, Deserialize)]
-pub struct SubscribeResponse {
-    pub success: bool,
-    pub topics: Vec<String>,
-    pub error: Option<String>,
-}
-
-#[derive(Debug, Clone, Serialize, Deserialize)]
-pub struct UnsubscribeRequest {
-    pub target: Address, // note see if target is publisher or a subscriber, tailor
-    pub topics: Vec<String>,
-}
-
-#[derive(Debug, Clone, Serialize, Deserialize)]
-pub struct UnsubscribeResponse {
-    pub success: bool,
-    pub topics: Vec<String>,
-    pub error: Option<String>,
-}
-
-#[derive(Debug, Clone, Serialize, Deserialize)]
-pub struct PublishMessage {
-    pub topic: String,
-    pub sequence: u64, // [1,2, 4, 6] - > [3, 5]
-                       // payload: as blob
-}
-
-#[derive(Debug, Clone, Serialize, Deserialize)]
-pub struct Ack {
-    pub topic: String,
-    pub sequence: u64,
-}
-
-#[derive(Debug, Clone, Serialize, Deserialize)]
-pub struct FetchMessagesRequest {
-    // maybe remove
-    pub subscriber: Address,
-    pub publisher: Address,
-    pub topic: String,
-    pub from_sequence: u64,
-    pub max_messages: usize,
-}
-
-#[derive(Debug, Clone, Serialize, Deserialize)]
-pub struct FetchMessagesResponse {
-    // maybe remove
-    pub messages: Vec<PublishMessage>,
-    pub more_available: bool,
-}
-
-#[derive(Debug, Clone, Serialize, Deserialize)]
-pub struct Heartbeat {
-    pub timestamp: u64,
-}
-
-#[derive(Debug, Clone, Serialize, Deserialize)]
-pub struct HeartbeatResponse {
-    pub timestamp: u64,
-    pub status: HeartbeatStatus,
-}
-
-#[derive(Debug, Clone, Serialize, Deserialize)]
-pub enum HeartbeatStatus {
-    Ok,
-    Busy,
-    Error(String),
+pub enum SubError {
+    SpawningError(String),
+    SerializeError(String),
+    InvalidAddress,
+    SubscriptionNotFound,
+    SubInitError(String),
+    UnsubscribeError(String),
 }
