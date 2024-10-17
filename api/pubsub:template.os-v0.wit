@@ -65,12 +65,13 @@ interface pub {
 }
 
 interface sub {
-    use common.{subscribe-request, subscribe-response, unsubscribe-request, unsubscribe-response, heartbeat};
+    use common.{subscribe-request, publish-request, subscribe-response, unsubscribe-request, unsubscribe-response, heartbeat};
 
     variant sub-request {
         init-sub(init-sub-request),
         subscribe(subscribe-request),
         unsubscribe(unsubscribe-request),
+        publish(publish-request),
         ping,
     }
 
@@ -89,9 +90,13 @@ interface sub {
     }
 }
 
-world pubsub-template-os-v0 {
+world pubsub {
     import pub;
     import sub;
     import common;
+ }
+
+world pubsub-template-os-v0 {
+    include pubsub;
     include process-v0;
 }

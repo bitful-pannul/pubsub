@@ -5,7 +5,10 @@ use kinode_process_lib::{
 use serde::{Deserialize, Serialize};
 use std::{collections::HashSet, str::FromStr};
 
-use kinode::process::sub::{InitSubRequest, SubRequest, SubResponse};
+use kinode::process::{
+    common::{SubscribeRequest, SubscribeResponse},
+    sub::{InitSubRequest, SubRequest, SubResponse},
+};
 
 const TIMER_PROCESS: &str = "timer:distro:sys";
 
@@ -53,13 +56,44 @@ impl SubscriberState {
                                 .map(|addr_str| Address::from_str(&addr_str))
                                 .collect();
                             if let Ok(forward_to) = forward_to {
-                                return SubscriberState::new(Subscription {
-                                    publisher,
-                                    topic: req.topic,
-                                    last_received_seq: req.from_sequence.unwrap_or(0),
-                                    parent,
-                                    forward_to,
-                                });
+                                // this is slightly clunky... and we need to get the resubscribing flow solid.
+                                // but, we need to actually subscribe hehe.
+                                // might be better to do this in a separate request. state is however cleaner this way.
+
+                                let r =
+                                    serde_json::to_vec(&SubRequest::Subscribe(SubscribeRequest {
+                                        topic: req.topic,
+                                        from_sequence: req.from_sequence,
+                                    }))
+                                    .unwrap();
+
+                                let x = Request::to(&publisher)
+                                    .body(r)
+                                    .send_and_await_response(10)
+                                    .unwrap();
+
+                                if let Ok(res) = x {
+                                    // let json_debug = serde_json::to_string(&res.body());
+                                    let resp: SubscribeResponse =
+                                        serde_json::from_slice(&res.body())
+                                            .expect("didn't quite serialize...");
+
+                                    // give response back to parent!
+                                    Response::new()
+                                        .body(serde_json::to_vec(&resp).unwrap())
+                                        .send()
+                                        .unwrap();
+
+                                    if resp.success {
+                                        return SubscriberState::new(Subscription {
+                                            parent,
+                                            publisher,
+                                            topic: resp.topic,
+                                            last_received_seq: req.from_sequence.unwrap_or(0),
+                                            forward_to,
+                                        });
+                                    }
+                                }
                             }
                         }
                     }
@@ -91,8 +125,6 @@ fn handle_message(message: Message, state: &mut SubscriberState) -> Result<()> {
 }
 
 fn handle_request(req: SubRequest, source: &Address, state: &mut SubscriberState) -> Result<()> {
-    // this only handles unsubscribe requests for now, which also shut down the worker.
-    // subscribe requests are handled in the initialization.
     match &req {
         SubRequest::Unsubscribe(unsub) => {
             if source == &state.subscription.parent {
@@ -113,6 +145,28 @@ fn handle_request(req: SubRequest, source: &Address, state: &mut SubscriberState
                 // but we need that anyway I feel like.
             }
         }
+        SubRequest::Publish(pub_msg) => {
+            if state.subscription.topic == pub_msg.topic {
+                state.subscription.last_received_seq = pub_msg.sequence;
+                println!("sub: got message. seq: {}", pub_msg.sequence);
+
+                let req_body = serde_json::to_vec(&req)?;
+
+                // Forward to parent
+                Request::to(&state.subscription.parent)
+                    .body(req_body.clone())
+                    .inherit(true)
+                    .send()?;
+
+                // Forward to other subscribers
+                for forward_to in &state.subscription.forward_to {
+                    Request::to(forward_to)
+                        .body(req_body.clone())
+                        .inherit(true)
+                        .send()?;
+                }
+            }
+        }
         _ => {}
     }
     Ok(())
@@ -127,8 +181,8 @@ fn handle_response(res: SubResponse, source: &Address, state: &mut SubscriberSta
 }
 
 call_init!(init);
-fn init(our: Address) {
-    println!("sub init");
+fn init(_our: Address) {
+    println!("subscriber init");
 
     // need init message to set the parent address.
 
@@ -144,10 +198,10 @@ fn init(our: Address) {
 
     loop {
         match await_message() {
-            Err(send_error) => println!("got SendError: {send_error}"),
+            Err(send_error) => println!("subscriber: got SendError: {send_error}"),
             Ok(message) => {
                 if let Err(e) = handle_message(message, &mut state) {
-                    println!("error handling message: {e}");
+                    println!("subscriber: error handling message: {e}");
                 }
             }
         }
