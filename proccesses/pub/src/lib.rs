@@ -1,20 +1,14 @@
 use anyhow::Result;
 use kinode_process_lib::{
-    await_message, call_init, get_state, println, Address, Message, ProcessId, Request, Response,
+    await_message, call_init, get_blob, get_state, println, Address, Message, ProcessId, Request,
+    Response,
+};
+use kinode_pubsub::{
+    InitPubRequest, MessageHistory, PubConfig, PubRequest, PublishRequest, SubscribeResponse,
 };
 use serde::{Deserialize, Serialize};
 use std::{collections::HashSet, str::FromStr};
 
-use kinode::process::{
-    common::SubscribeResponse,
-    pub_::{InitPubRequest, PubConfig, PubRequest, PublishRequest},
-    standard::get_blob,
-};
-
-mod history;
-mod pubsub;
-
-use history::MessageHistory;
 wit_bindgen::generate!({
     path: "target/wit",
     world: "pubsub-template-os-v0",
@@ -43,9 +37,10 @@ pub struct PublisherState {
 
 impl PublisherState {
     pub fn new(config: PubConfig, parent: &Address, topic: String) -> Result<Self> {
-        // todo: it's by package_id anyway, we can use parent as "our" here.
+        // note: it's by package_id anyway, we can use parent as "our" here.
+        // error possibility handling?
         let message_history = MessageHistory::new(parent.clone(), config.default_persistence)?;
-        // wat do about errors...
+
         Ok(PublisherState {
             topic,
             config,

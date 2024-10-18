@@ -1,10 +1,7 @@
 use anyhow::Result;
-use kinode_process_lib::{
-    our_capabilities, spawn, Address, LazyLoadBlob, OnExit, PackageId, ProcessId, Request,
-};
+use kinode_process_lib::{our_capabilities, spawn, Address, OnExit, PackageId, ProcessId, Request};
 use serde::{Deserialize, Serialize};
-use std::collections::{HashMap, HashSet};
-use std::str::FromStr;
+use std::collections::HashMap;
 
 use crate::kinode::process::common::UnsubscribeRequest;
 use crate::kinode::process::pub_::{
@@ -13,7 +10,6 @@ use crate::kinode::process::pub_::{
 use crate::kinode::process::sub::{InitSubRequest, SubRequest, SubResponse};
 
 // main library helper struct
-
 //
 //
 //
@@ -40,9 +36,6 @@ use crate::kinode::process::sub::{InitSubRequest, SubRequest, SubResponse};
 //
 //
 //
-
-// handle_incoming_sub() -> {
-// }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[allow(unused)]
