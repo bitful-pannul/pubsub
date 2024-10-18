@@ -31,6 +31,25 @@ fn init(our: Address) {
 }
 ```
 
+The PubConfig::default() looks like this, as seen in the wit api:
+
+```wit
+    /// Config for publications
+    record pub-config {
+        max-retry-attempts: u32,          // default 3
+        retry-interval: u64,              // default 120 seconds
+        heartbeat-interval: u64,          // default 60 seconds
+        default-persistence: persistence, // default memory(1000)
+    }
+
+    /// Persistence options for publications.
+    variant persistence {
+        none,         // ephemeral, fire and forget.
+        memory(u64),  // in memory, max_length.
+        disk(u64),    // on disk, max_length.
+    }
+```
+
 ### Subscribing
 
 ```rust

@@ -9,34 +9,6 @@ use crate::kinode::process::pub_::{
 };
 use crate::kinode::process::sub::{InitSubRequest, SubRequest, SubResponse};
 
-// main library helper struct
-//
-//
-//
-// let config = PubConfig::def
-// let pub = Pub::new();
-//
-// let topic = pub.new_topic("my-posts", config::Default());
-//
-// let topic = pub.get_topic("my-posts");
-// topic.publish(b"hello there")?;
-//
-// pub.publish("my-posts", b"hello there")?;
-//
-//
-//
-
-// let sub = Sub::new();
-// let posts = sub.subscribe("posts", "doria.kino");
-// sub.subscribe("posts", "doria.kino");
-//
-// sub.subcribe_from("posts", 100);
-//
-// sub.unsubscribe("posts", "doria.kino"); // dropped etc
-//
-//
-//
-
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[allow(unused)]
 pub struct Pub {
