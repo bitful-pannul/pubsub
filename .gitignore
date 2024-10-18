@@ -1,4 +1,4 @@
-gnore target directories at any level
+# Ignore target directories at any level
 **/target/
 
 # Ignore pkg/*.zip files at any level
