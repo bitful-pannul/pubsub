@@ -1,0 +1,27 @@
+gnore target directories at any level
+**/target/
+
+# Ignore pkg/*.zip files at any level
+**/pkg/*.zip
+
+# Ignore swap files
+**/*.swp
+**/*.swo
+
+# Ignore wasi_snapshot_preview1.wasm at any level
+**/wasi_snapshot_preview1.wasm
+
+# Ignore wit directories at any level
+**/wit/
+
+# Ignore process_env directories at any level
+**/process_env/
+
+# Ignore .DS_Store files (common on macOS)
+.DS_Store
+
+# Ignore any potential log files
+*.log
+
+# Ignore any potential environment files
+.env
