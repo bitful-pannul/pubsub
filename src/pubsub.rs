@@ -3,6 +3,8 @@ use kinode_process_lib::{our_capabilities, spawn, Address, OnExit, PackageId, Pr
 use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
 
+use crate::binary_helpers::{populate_wasm, WasmType};
+
 use crate::kinode::process::common::UnsubscribeRequest;
 use crate::kinode::process::pub_::{
     InitPubRequest, Persistence, PubConfig, PubRequest, PublishRequest,
@@ -26,6 +28,11 @@ pub struct Publisher {
 impl Pub {
     pub fn new(our: &Address) -> Self {
         // load in state of previous publishers here?
+        // ...
+        // also check binary cases here. not later?
+        if let Err(e) = populate_wasm(our, WasmType::Pub) {
+            panic!("Error populating pub wasm: {}", e);
+        }
         // save state to kv? because it's being used as a library...
         Pub {
             publishers: HashMap::new(),
@@ -37,7 +44,6 @@ impl Pub {
         // spawn new publisher process
 
         // TODO: implement more granular capabilities, not just passing all from parent.
-        //
         let our_caps = our_capabilities();
         let process_name = format!("pub-{}", topic);
         let wasm_path = format!("{}/pkg/pub.wasm", self.our.package_id());
@@ -146,6 +152,9 @@ pub struct Subscriber {
 #[allow(unused)]
 impl Sub {
     pub fn new(our: &Address) -> Self {
+        if let Err(e) = populate_wasm(our, WasmType::Sub) {
+            panic!("Error populating sub wasm: {}", e);
+        }
         Sub {
             subscriptions: HashMap::new(),
             our: our.clone(),

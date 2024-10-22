@@ -5,6 +5,7 @@ wit_bindgen::generate!({
     additional_derives: [PartialEq, serde::Deserialize, serde::Serialize],
 });
 
+mod binary_helpers;
 pub mod history;
 pub mod pubsub;
 
