@@ -208,7 +208,7 @@ impl Sub {
 
         let res = Request::to(&subscriber_address)
             .body(serde_json::to_vec(&sub_init).unwrap())
-            .send_and_await_response(5)
+            .send_and_await_response(10)
             .unwrap()
             .map_err(|e| SubError::SubInitError(e.to_string()))?;
 
