@@ -1520,6 +1520,7 @@ dependencies = [
  "kinode_process_lib",
  "serde",
  "serde_json",
+ "sha2-const",
  "wit-bindgen",
 ]
 
@@ -2358,6 +2359,12 @@ dependencies = [
  "cpufeatures",
  "digest 0.10.7",
 ]
+
+[[package]]
+name = "sha2-const"
+version = "0.1.2"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "5edcd790916d95ff81bdc1505b09c74d30d47a755929cc8c71c59cbbfa99f91b"
 
 [[package]]
 name = "sha3-asm"

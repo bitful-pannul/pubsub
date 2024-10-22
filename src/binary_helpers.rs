@@ -4,23 +4,18 @@ use kinode_process_lib::{
     Address, ProcessId, Request,
 };
 use sha2_const::Sha256;
+
 /// helper functions for binary files
 // wasm binaries to allow avoiding the need to copy them into your project.
 // at boot of a new process, we check if there's a wasm in the pkg folder,
 // if it's sha256 matches the const, we use it.
 // otherwise we write the embedded version to the pkg folder and use that.
-use std::sync::OnceLock;
-
-// actually this... could be a feature flag? include_wasm = true/false?
-// then if you're already distributing an app, and you have it in you pkg, can keep the binary size of code down.
 static PUB_WASM: &[u8] = include_bytes!("../processes/pkg/pub.wasm");
 static SUB_WASM: &[u8] = include_bytes!("../processes/pkg/sub.wasm");
 
-static PUB_WASM_VEC: OnceLock<Vec<u8>> = OnceLock::new();
-static SUB_WASM_VEC: OnceLock<Vec<u8>> = OnceLock::new();
-
-// Calculate SHA256 hashes at compile-time
+#[allow(long_running_const_eval)]
 const PUB_WASM_HASH: [u8; 32] = calc_sha256(PUB_WASM);
+#[allow(long_running_const_eval)]
 const SUB_WASM_HASH: [u8; 32] = calc_sha256(SUB_WASM);
 
 // Const function to calculate SHA256 hash
@@ -38,7 +33,7 @@ pub enum WasmType {
 pub fn populate_wasm(our: &Address, wasm_type: WasmType) -> Result<()> {
     let (wasm_name, get_wasm, get_wasm_hash): (
         &str,
-        fn() -> &'static Vec<u8>,
+        fn() -> &'static [u8],
         fn() -> &'static [u8; 32],
     ) = match wasm_type {
         WasmType::Pub => ("pub", get_pub_wasm, get_pub_wasm_hash),
@@ -49,14 +44,12 @@ pub fn populate_wasm(our: &Address, wasm_type: WasmType) -> Result<()> {
 
     if let Ok(current_hash) = get_file_hash(&wasm_path, our) {
         if current_hash == *get_wasm_hash() {
-            return Ok(()); // hash matches, we're done
+            return Ok(());
         }
     }
 
-    // update WASM file
     update_wasm_file(&wasm_path, our, get_wasm())?;
 
-    // verify hash after update
     let updated_hash = get_file_hash(&wasm_path, our)?;
     if updated_hash == *get_wasm_hash() {
         Ok(())
@@ -107,12 +100,12 @@ fn update_wasm_file(path: &str, our: &Address, wasm_bytes: &[u8]) -> Result<()> 
 }
 
 // get wasm binaries helper functions
-fn get_pub_wasm() -> &'static Vec<u8> {
-    PUB_WASM_VEC.get_or_init(|| PUB_WASM.to_vec())
+fn get_pub_wasm() -> &'static [u8] {
+    PUB_WASM
 }
 
-fn get_sub_wasm() -> &'static Vec<u8> {
-    SUB_WASM_VEC.get_or_init(|| SUB_WASM.to_vec())
+fn get_sub_wasm() -> &'static [u8] {
+    SUB_WASM
 }
 
 fn get_pub_wasm_hash() -> &'static [u8; 32] {
