@@ -1,8 +1,8 @@
 wit_bindgen::generate!({
     path: "wit-api",
-    world: "pubsub-lib",
+    world: "pubsub-v0",
     generate_unused_types: true,
-    additional_derives: [PartialEq, serde::Deserialize, serde::Serialize],
+    additional_derives: [PartialEq, serde::Deserialize, serde::Serialize, process_macros::SerdeJsonInto],
 });
 
 mod binary_helpers;
@@ -17,4 +17,6 @@ pub use kinode::process::common::UnsubscribeRequest;
 pub use kinode::process::pub_::{
     InitPubRequest, Persistence, PubConfig, PubRequest, PublishRequest,
 };
-pub use kinode::process::sub::{InitSubRequest, SubRequest, SubResponse, SubscribeResponse};
+pub use kinode::process::sub::{
+    InitSubRequest, SubRequest, SubResponse, SubscribeRequest, SubscribeResponse,
+};

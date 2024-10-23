@@ -64,7 +64,7 @@ impl Pub {
             config: config,
         };
         Request::to(&publisher_address)
-            .body(serde_json::to_vec(&init_pub_request).unwrap())
+            .body(&init_pub_request)
             .send()
             .unwrap();
 
@@ -89,7 +89,7 @@ impl Pub {
             });
 
             Request::to(&publisher.address)
-                .body(serde_json::to_vec(&publish_message).unwrap())
+                .body(&publish_message)
                 .blob_bytes(message)
                 .send()
                 .unwrap();
@@ -198,16 +198,16 @@ impl Sub {
 
         let subscriber_address = Address::new(self.our.node.clone(), process);
 
-        let sub_init = SubRequest::InitSub(InitSubRequest {
+        let sub_init = InitSubRequest {
             topic: topic.to_string(),
             parent: self.our.to_string(),
             forward_to: vec![],
             publisher: publisher.to_string(),
             from_sequence: sequence,
-        });
+        };
 
         let res = Request::to(&subscriber_address)
-            .body(serde_json::to_vec(&sub_init).unwrap())
+            .body(&sub_init)
             .send_and_await_response(10)
             .unwrap()
             .map_err(|e| SubError::SubInitError(e.to_string()))?;
@@ -272,7 +272,7 @@ impl Sub {
                 topic: topic.to_string(),
             });
             Request::to(&subscriber.address)
-                .body(serde_json::to_vec(&unsub_request).unwrap())
+                .body(&unsub_request)
                 .send()
                 .map_err(|e| SubError::UnsubscribeError(e.to_string()))?;
 

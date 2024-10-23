@@ -1,7 +1,7 @@
 use anyhow::Result;
 use kinode_process_lib::{
-    await_message, call_init, get_blob, get_state, println, Address, Message, ProcessId, Request,
-    Response,
+    await_message, call_init, get_blob, get_state, kinode::process::standard::OnExit, println,
+    save_capabilities, set_on_exit, Address, Capability, Message, ProcessId, Request, Response,
 };
 use kinode_pubsub::{
     InitPubRequest, MessageHistory, PubConfig, PubRequest, PublishRequest, SubscribeResponse,
@@ -11,19 +11,14 @@ use std::{collections::HashSet, str::FromStr};
 
 wit_bindgen::generate!({
     path: "target/wit",
-    world: "pubsub-template-os-v0",
+    world: "process-v0",
     generate_unused_types: true,
     additional_derives: [PartialEq, serde::Deserialize, serde::Serialize],
 });
 
-// s123123123123132:callat:publisher.os
-
 const TIMER_PROCESS: &str = "timer:distro:sys";
 
-// todo: figure out restart/state situation! especially if exit situation! :)
-//       also, do try out exit:: with restart functionality especially here.
-//       in the subscriber, probably not possible.
-
+// todo: figure out restart/state situation!
 #[derive(Debug, Serialize, Deserialize)]
 pub struct PublisherState {
     topic: String,
@@ -37,8 +32,6 @@ pub struct PublisherState {
 
 impl PublisherState {
     pub fn new(config: PubConfig, parent: &Address, topic: String) -> Result<Self> {
-        // note: it's by package_id anyway, we can use parent as "our" here.
-        // error possibility handling?
         let message_history = MessageHistory::new(parent.clone(), config.default_persistence)?;
 
         Ok(PublisherState {
@@ -51,22 +44,25 @@ impl PublisherState {
             message_history,
         })
     }
-    // todo: implement save state at the right moments... recovery too.
-    pub fn load() -> Result<Self> {
+    // todo: implement save state at the right moments.
+    pub fn load(our: &Address) -> Result<Self> {
         if let Some(state) = get_state() {
             if let Ok(state) = serde_json::from_slice::<PublisherState>(&state) {
                 return Ok(state);
             }
         }
         // if not found/successfully deserialized, wait for init message.
-        // todo: add check of our_package = this_package
-        loop {
-            if let Ok(message) = await_message() {
-                if let Ok(req) = serde_json::from_slice::<InitPubRequest>(&message.body()) {
-                    return Self::new(req.config, message.source(), req.topic);
-                }
-            }
+        let message = await_message()?;
+        if message.source().node() != our.node()
+            && message.source().package_id() != our.package_id()
+        {
+            return Err(anyhow::anyhow!(
+                "publisher got init message from wrong source!"
+            ));
         }
+
+        let req: InitPubRequest = serde_json::from_slice(&message.body())?;
+        Self::new(req.config, message.source(), req.topic)
     }
 }
 
@@ -78,12 +74,10 @@ fn handle_message(message: Message, state: &mut PublisherState) -> Result<()> {
         // check heartbeats, retry messages if applicable.
         return Ok(());
     }
-
     if message.is_request() {
         let req: PubRequest = serde_json::from_slice(&message.body())?;
-        handle_request(req, message.source(), state)?;
+        handle_request(req, message.source(), state, message.capabilities())?;
     } else {
-        // not sure if we need this.
         // maybe as a PONG response...
         // let res: PubSubResponse = serde_json::from_slice(&message.body())?;
         // handle_response(res, message.source(), state)?;
@@ -92,11 +86,18 @@ fn handle_message(message: Message, state: &mut PublisherState) -> Result<()> {
     Ok(())
 }
 
-fn handle_request(req: PubRequest, source: &Address, state: &mut PublisherState) -> Result<()> {
+fn handle_request(
+    req: PubRequest,
+    source: &Address,
+    state: &mut PublisherState,
+    caps: &Vec<Capability>,
+) -> Result<()> {
     match req {
         PubRequest::Subscribe(sub_req) => {
             let (success, error) = if state.topic == sub_req.topic {
                 state.subscribers.insert(source.clone());
+                // save messaging cap!
+                save_capabilities(caps.as_slice());
                 (true, None)
             } else {
                 (
@@ -112,7 +113,7 @@ fn handle_request(req: PubRequest, source: &Address, state: &mut PublisherState)
                 topic: sub_req.topic,
                 error,
             };
-            Response::new().body(serde_json::to_vec(&res)?).send()?;
+            Response::new().body(res).send()?;
 
             // send historical messages too if requested.
             if success && sub_req.from_sequence.is_some() {
@@ -126,7 +127,7 @@ fn handle_request(req: PubRequest, source: &Address, state: &mut PublisherState)
                         sequence: message.sequence,
                     });
                     Request::to(source)
-                        .body(serde_json::to_vec(&historical_pub_req)?)
+                        .body(&historical_pub_req)
                         .blob_bytes(message.content)
                         .send()?;
                 }
@@ -150,7 +151,7 @@ fn handle_request(req: PubRequest, source: &Address, state: &mut PublisherState)
                 topic: unsub_req.topic,
                 error,
             };
-            Response::new().body(serde_json::to_vec(&res)?).send()?;
+            Response::new().body(&res).send()?;
         }
         PubRequest::Publish(mut pub_msg) => {
             if source == &state.parent {
@@ -174,32 +175,38 @@ fn handle_request(req: PubRequest, source: &Address, state: &mut PublisherState)
 
                 for subscriber in &state.subscribers {
                     Request::to(subscriber)
-                        .body(serde_json::to_vec(&req)?)
+                        .body(&req)
                         .blob_bytes(bytes.clone())
                         .send()?;
                 }
             }
+        }
+        PubRequest::Kill => {
+            set_on_exit(&OnExit::None);
+            // maybe clear state too? and kv store?
+            panic!("publisher got kill request, exiting and not restarting");
         }
         _ => {}
     }
     Ok(())
 }
 
-// might not need at all.
-fn handle_response(res: PubRequest, source: &Address, state: &mut PublisherState) -> Result<()> {
+fn handle_response(_res: PubRequest, _source: &Address, _state: &mut PublisherState) -> Result<()> {
     Ok(())
 }
 
 call_init!(init);
-fn init(_our: Address) {
+fn init(our: Address) {
     println!("publisher init");
 
     // upon init, publisher checks for a saved state+config,
     // if not found, it'll wait for a init message from the publisher including config.
-    let mut state: PublisherState = match PublisherState::load() {
+    // if something fails in the init flow, it'll exit.
+    let mut state: PublisherState = match PublisherState::load(&our) {
         Ok(state) => state,
         Err(e) => {
-            println!("publisher: BRUTAL failure of loading state: {e} EXITING");
+            println!("publisher: failure of loading state: {e} exiting");
+            set_on_exit(&OnExit::None);
             return;
         }
     };

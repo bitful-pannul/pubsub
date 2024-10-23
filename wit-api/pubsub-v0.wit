@@ -39,7 +39,8 @@ interface pub {
         init-pub(init-pub-request),
         publish(publish-request),
         subscribe(subscribe-request),
-        unsubscribe(unsubscribe-request)
+        unsubscribe(unsubscribe-request),
+        kill,
     }
 
     // Initialize request
@@ -90,13 +91,8 @@ interface sub {
     }
 }
 
-world pubsub {
+world pubsub-v0 {
     import pub;
     import sub;
     import common;
- }
-
-world pubsub-template-os-v0 {
-    include pubsub;
-    include process-v0;
 }

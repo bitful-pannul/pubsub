@@ -1518,6 +1518,7 @@ version = "0.1.0"
 dependencies = [
  "anyhow",
  "kinode_process_lib",
+ "process_macros",
  "serde",
  "serde_json",
  "sha2-const",
@@ -1927,6 +1928,15 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "7c3a7fc5db1e57d5a779a352c8cdb57b29aa4c40cc69c3a68a7fedc815fbf2f9"
 dependencies = [
  "unicode-ident",
+]
+
+[[package]]
+name = "process_macros"
+version = "0.1.0"
+source = "git+https://github.com/kinode-dao/process_macros?rev=626e501#626e501d351e3365480ec6f770d474ed4ae339bf"
+dependencies = [
+ "quote",
+ "syn 2.0.79",
 ]
 
 [[package]]

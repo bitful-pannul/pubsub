@@ -1,3 +1,7 @@
+//
+// kinode.wit, copied from https://github.com/kinode-dao/kinode-wit/tree/v0.8
+//
+
 package kinode:process@0.8.0;
 
 interface standard {
