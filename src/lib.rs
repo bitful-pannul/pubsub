@@ -9,10 +9,12 @@ mod binary_helpers;
 pub mod history;
 pub mod pubsub;
 
-// re-export main api helper structs and common types.
-pub use pubsub::{Pub, Sub};
+// re-export main api helper structs
 
 pub use history::MessageHistory;
+pub use pubsub::{Pub, PubError, Sub, SubError};
+
+// re-export common wit types
 pub use kinode::process::common::UnsubscribeRequest;
 pub use kinode::process::pub_::{
     InitPubRequest, Persistence, PubConfig, PubRequest, PublishRequest,

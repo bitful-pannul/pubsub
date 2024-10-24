@@ -1,5 +1,8 @@
 use anyhow::Result;
-use kinode_process_lib::{our_capabilities, spawn, Address, OnExit, PackageId, ProcessId, Request};
+use kinode_process_lib::kv::Kv;
+use kinode_process_lib::{
+    kv, our_capabilities, spawn, Address, OnExit, PackageId, ProcessId, Request,
+};
 use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
 
@@ -9,13 +12,16 @@ use crate::kinode::process::common::UnsubscribeRequest;
 use crate::kinode::process::pub_::{
     InitPubRequest, Persistence, PubConfig, PubRequest, PublishRequest,
 };
-use crate::kinode::process::sub::{InitSubRequest, SubRequest, SubResponse};
+use crate::kinode::process::sub::{
+    InitSubRequest, SubRequest, SubscribeRequest, SubscribeResponse,
+};
 
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Serialize, Deserialize)]
 #[allow(unused)]
 pub struct Pub {
     publishers: HashMap<String, Publisher>, // topic, metadata
     our: Address,
+    kv: Kv<String, Vec<u8>>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -26,18 +32,39 @@ pub struct Publisher {
 
 #[allow(unused)]
 impl Pub {
-    pub fn new(our: &Address) -> Self {
-        // load in state of previous publishers here?
-        // ...
-        // also check binary cases here. not later?
-        if let Err(e) = populate_wasm(our, WasmType::Pub) {
-            panic!("Error populating pub wasm: {}", e);
-        }
-        // save state to kv? because it's being used as a library...
-        Pub {
-            publishers: HashMap::new(),
-            our: our.clone(),
-        }
+    pub fn new(our: &Address) -> Result<Self> {
+        let db_name = format!("pub-{}", &our.process);
+
+        let kv: Kv<String, Vec<u8>> = kv::open(our.package_id(), &db_name, None)?;
+        populate_wasm(our, WasmType::Pub)?;
+
+        // load state
+        let pub_instance = match Self::load_state(&kv) {
+            Ok(loaded_state) => loaded_state,
+            Err(_) => {
+                let new_state = Self {
+                    publishers: HashMap::new(),
+                    our: our.clone(),
+                    kv: kv.clone(),
+                };
+                new_state.save_state()?;
+                new_state
+            }
+        };
+
+        Ok(pub_instance)
+    }
+
+    fn load_state(kv: &Kv<String, Vec<u8>>) -> Result<Self> {
+        let state = kv.get(&"state".to_string())?;
+        let pubsub: Self = serde_json::from_slice(&state)?;
+        Ok(pubsub)
+    }
+
+    fn save_state(&self) -> Result<()> {
+        let state = serde_json::to_vec(&self)?;
+        self.kv.set(&"state".to_string(), &state, None)?;
+        Ok(())
     }
 
     pub fn new_topic(&mut self, topic: &str, config: PubConfig) -> Result<(), PubError> {
@@ -105,13 +132,11 @@ impl Pub {
             Ok(())
         }
     }
-    /// todo:: implement killing of the process.
+
     pub fn remove_topic(&mut self, topic: &str) -> Result<(), PubError> {
         if let Some(publisher) = self.publishers.get(topic) {
-            Request::to(&publisher.address)
-                .body(b"kill")
-                .send()
-                .unwrap();
+            let req = PubRequest::Kill;
+            Request::to(&publisher.address).body(&req).send().unwrap();
         }
         Ok(())
     }
@@ -128,13 +153,13 @@ impl Default for PubConfig {
     }
 }
 
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Serialize, Deserialize)]
 #[allow(unused)]
 pub struct Sub {
     subscriptions: HashMap<Subscription, Subscriber>, // (publisher, topic) -> sequence (do we need this)
     our: Address,
-    // could also have topic -> (publisher, sequence)...
-    // different lib or optimization here?
+    kv: Kv<String, Vec<u8>>,
+    // could also have topic -> (publisher, sequence)
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, Eq, PartialEq, Hash)]
@@ -146,19 +171,44 @@ pub struct Subscription {
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct Subscriber {
     address: Address,     // subscriber workers address
-    latest_sequence: u64, // latest sequence number received (pain to keep up to date?)
+    latest_sequence: u64, // latest sequence number received (pain to keep up to date?) would need manual macro for user not to implement.
 }
 
 #[allow(unused)]
 impl Sub {
-    pub fn new(our: &Address) -> Self {
-        if let Err(e) = populate_wasm(our, WasmType::Sub) {
-            panic!("Error populating sub wasm: {}", e);
-        }
-        Sub {
-            subscriptions: HashMap::new(),
-            our: our.clone(),
-        }
+    pub fn new(our: &Address) -> Result<Self> {
+        let db_name = format!("sub-{}", &our.process);
+        let kv: Kv<String, Vec<u8>> = kv::open(our.package_id(), &db_name, None)?;
+
+        populate_wasm(our, WasmType::Sub)?;
+
+        // try loading state
+        let sub_instance = match Self::load_state(&kv) {
+            Ok(loaded_state) => loaded_state,
+            Err(_) => {
+                let new_state = Self {
+                    subscriptions: HashMap::new(),
+                    our: our.clone(),
+                    kv: kv.clone(),
+                };
+                new_state.save_state()?;
+                new_state
+            }
+        };
+
+        Ok(sub_instance)
+    }
+
+    fn load_state(kv: &Kv<String, Vec<u8>>) -> Result<Self> {
+        let state = kv.get(&"state".to_string())?;
+        let sub: Self = serde_json::from_slice(&state)?;
+        Ok(sub)
+    }
+
+    fn save_state(&self) -> Result<()> {
+        let state = serde_json::to_vec(&self)?;
+        self.kv.set(&"state".to_string(), &state, None)?;
+        Ok(())
     }
 
     pub fn subscribe_from<T: Into<PackageId>>(
@@ -182,8 +232,15 @@ impl Sub {
             topic: topic.to_string(),
         };
 
-        if self.subscriptions.contains_key(&subscription) {
-            // we have a sequence already.. resubscribe?
+        if let Some(subscriber) = self.subscriptions.get(&subscription) {
+            // TODO: resubscribe, sending a normal subscribe request
+            let req = SubRequest::Subscribe(SubscribeRequest {
+                topic: topic.to_string(),
+                from_sequence: sequence,
+            });
+
+            Request::to(&subscriber.address).body(&req).send().unwrap();
+
             return Ok(());
         }
 
@@ -192,7 +249,7 @@ impl Sub {
 
         // we spawn a subscriber.
         let wasm_path = format!("{}/pkg/sub.wasm", self.our.package_id());
-        // TODO: needs ability to message its parent? //networking?
+
         let process = spawn(None, &wasm_path, OnExit::Restart, our_caps, vec![], false)
             .map_err(|e| SubError::SpawningError(e.to_string()))?;
 
@@ -212,27 +269,21 @@ impl Sub {
             .unwrap()
             .map_err(|e| SubError::SubInitError(e.to_string()))?;
 
-        let sub_response = serde_json::from_slice::<SubResponse>(&res.body())
+        let sub_response = serde_json::from_slice::<SubscribeResponse>(&res.body())
             .map_err(|e| SubError::SerializeError(e.to_string()))?;
 
-        if let SubResponse::Subscribe(sub) = sub_response {
-            println!("init_sub response: {:?}", sub);
-
-            if !sub.success {
-                return Err(SubError::SubInitError(sub.error.unwrap_or_default()));
-            }
-
-            let subscriber = Subscriber {
-                address: subscriber_address,
-                latest_sequence: sequence.unwrap_or(0),
-            };
-
-            self.subscriptions.insert(subscription, subscriber);
-        } else {
-            return Err(SubError::SerializeError(
-                "Not a SubscribeResponse".to_string(),
+        if !sub_response.success {
+            return Err(SubError::SubInitError(
+                sub_response.error.unwrap_or_default(),
             ));
         }
+
+        let subscriber = Subscriber {
+            address: subscriber_address,
+            latest_sequence: sequence.unwrap_or(0),
+        };
+
+        self.subscriptions.insert(subscription, subscriber);
 
         Ok(())
     }
@@ -285,13 +336,6 @@ impl Sub {
 
 // Error types
 #[derive(Debug, Clone, Serialize, Deserialize)]
-pub enum PubError {
-    TopicNotFound,
-    SpawningError(String),
-    NoPublisherProcessFound(String),
-}
-
-#[derive(Debug, Clone, Serialize, Deserialize)]
 pub enum SubError {
     SpawningError(String),
     SerializeError(String),
@@ -300,3 +344,38 @@ pub enum SubError {
     SubInitError(String),
     UnsubscribeError(String),
 }
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub enum PubError {
+    TopicNotFound,
+    SpawningError(String),
+    NoPublisherProcessFound(String),
+}
+
+impl std::fmt::Display for PubError {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            PubError::TopicNotFound => write!(f, "Topic not found"),
+            PubError::SpawningError(s) => write!(f, "Error spawning process: {}", s),
+            PubError::NoPublisherProcessFound(s) => {
+                write!(f, "No publisher process found for: {}", s)
+            }
+        }
+    }
+}
+
+impl std::fmt::Display for SubError {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            SubError::SpawningError(s) => write!(f, "Error spawning process: {}", s),
+            SubError::SerializeError(s) => write!(f, "Serialization error: {}", s),
+            SubError::InvalidAddress => write!(f, "Invalid address"),
+            SubError::SubscriptionNotFound => write!(f, "Subscription not found"),
+            SubError::SubInitError(s) => write!(f, "Subscriber initialization error: {}", s),
+            SubError::UnsubscribeError(s) => write!(f, "Unsubscribe error: {}", s),
+        }
+    }
+}
+
+impl std::error::Error for SubError {}
+impl std::error::Error for PubError {}

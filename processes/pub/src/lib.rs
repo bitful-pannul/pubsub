@@ -1,7 +1,8 @@
 use anyhow::Result;
 use kinode_process_lib::{
-    await_message, call_init, get_blob, get_state, kinode::process::standard::OnExit, println,
-    save_capabilities, set_on_exit, Address, Capability, Message, ProcessId, Request, Response,
+    await_message, call_init, clear_state, get_blob, get_state, kinode::process::standard::OnExit,
+    println, save_capabilities, set_on_exit, set_state, Address, Capability, Message, ProcessId,
+    Request, Response,
 };
 use kinode_pubsub::{
     InitPubRequest, MessageHistory, PubConfig, PubRequest, PublishRequest, SubscribeResponse,
@@ -18,7 +19,6 @@ wit_bindgen::generate!({
 
 const TIMER_PROCESS: &str = "timer:distro:sys";
 
-// todo: figure out restart/state situation!
 #[derive(Debug, Serialize, Deserialize)]
 pub struct PublisherState {
     topic: String,
@@ -44,6 +44,7 @@ impl PublisherState {
             message_history,
         })
     }
+
     // todo: implement save state at the right moments.
     pub fn load(our: &Address) -> Result<Self> {
         if let Some(state) = get_state() {
@@ -63,6 +64,15 @@ impl PublisherState {
 
         let req: InitPubRequest = serde_json::from_slice(&message.body())?;
         Self::new(req.config, message.source(), req.topic)
+    }
+
+    pub fn save(&self) -> Result<()> {
+        set_state(&serde_json::to_vec(&self)?);
+        Ok(())
+    }
+
+    pub fn clear(&self) {
+        clear_state();
     }
 }
 
@@ -98,6 +108,7 @@ fn handle_request(
                 state.subscribers.insert(source.clone());
                 // save messaging cap!
                 save_capabilities(caps.as_slice());
+                let _ = state.save();
                 (true, None)
             } else {
                 (
@@ -136,6 +147,7 @@ fn handle_request(
         PubRequest::Unsubscribe(unsub_req) => {
             let (success, error) = if state.topic == unsub_req.topic {
                 state.subscribers.remove(source);
+                let _ = state.save();
                 (true, None)
             } else {
                 (
@@ -183,7 +195,7 @@ fn handle_request(
         }
         PubRequest::Kill => {
             set_on_exit(&OnExit::None);
-            // maybe clear state too? and kv store?
+            let _ = state.clear();
             panic!("publisher got kill request, exiting and not restarting");
         }
         _ => {}
@@ -191,7 +203,11 @@ fn handle_request(
     Ok(())
 }
 
-fn handle_response(_res: PubRequest, _source: &Address, _state: &mut PublisherState) -> Result<()> {
+fn _handle_response(
+    _res: PubRequest,
+    _source: &Address,
+    _state: &mut PublisherState,
+) -> Result<()> {
     Ok(())
 }
 
@@ -210,6 +226,8 @@ fn init(our: Address) {
             return;
         }
     };
+
+    let _ = state.save();
 
     loop {
         match await_message() {
