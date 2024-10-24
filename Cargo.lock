@@ -1491,9 +1491,8 @@ dependencies = [
 
 [[package]]
 name = "kinode_process_lib"
-version = "0.9.3"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "7722aef4bff0625445fafda89a02f82ce0e16c7def6024e1317ae55a632ad331"
+version = "0.9.4"
+source = "git+https://github.com/kinode-dao/process_lib?rev=5103203#5103203fd59d35625a9f841fcd2626d8bf5c3e82"
 dependencies = [
  "alloy",
  "alloy-primitives 0.7.7",
@@ -1518,8 +1517,10 @@ version = "0.1.0"
 dependencies = [
  "anyhow",
  "kinode_process_lib",
+ "process_macros",
  "serde",
  "serde_json",
+ "sha2-const",
  "wit-bindgen",
 ]
 
@@ -1926,6 +1927,15 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "7c3a7fc5db1e57d5a779a352c8cdb57b29aa4c40cc69c3a68a7fedc815fbf2f9"
 dependencies = [
  "unicode-ident",
+]
+
+[[package]]
+name = "process_macros"
+version = "0.1.0"
+source = "git+https://github.com/kinode-dao/process_macros?rev=626e501#626e501d351e3365480ec6f770d474ed4ae339bf"
+dependencies = [
+ "quote",
+ "syn 2.0.79",
 ]
 
 [[package]]
@@ -2346,6 +2356,12 @@ dependencies = [
  "cpufeatures",
  "digest 0.10.7",
 ]
+
+[[package]]
+name = "sha2-const"
+version = "0.1.2"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "5edcd790916d95ff81bdc1505b09c74d30d47a755929cc8c71c59cbbfa99f91b"
 
 [[package]]
 name = "sha3-asm"
