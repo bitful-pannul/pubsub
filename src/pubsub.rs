@@ -16,14 +16,17 @@ use crate::kinode::process::sub::{
     InitSubRequest, SubRequest, SubscribeRequest, SubscribeResponse,
 };
 
-#[derive(Debug, Serialize, Deserialize)]
+/// Represents a publisher in the pub-sub system.
+#[derive(Debug, Serialize, Deserialize, Clone)]
 #[allow(unused)]
 pub struct Pub {
-    publishers: HashMap<String, Publisher>, // topic, metadata
+    publishers: HashMap<String, Publisher>,
     our: Address,
     kv: Kv<String, Vec<u8>>,
+    default_config: PubConfig,
 }
 
+/// Metadata for a specific publisher.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct Publisher {
     pub address: Address,
@@ -32,7 +35,17 @@ pub struct Publisher {
 
 #[allow(unused)]
 impl Pub {
-    pub fn new(our: &Address) -> Result<Self> {
+    /// Creates a new `Pub` instance with the given address and default configuration.
+    ///
+    /// # Arguments
+    ///
+    /// * `our` - The address of the current process.
+    /// * `default_config` - The default configuration for new publishers.
+    ///
+    /// # Returns
+    ///
+    /// A `Result` containing the new `Pub` instance or an error.
+    pub fn new(our: &Address, default_config: PubConfig) -> Result<Self> {
         let db_name = format!("pub-{}", &our.process);
 
         let kv: Kv<String, Vec<u8>> = kv::open(our.package_id(), &db_name, None)?;
@@ -46,6 +59,7 @@ impl Pub {
                     publishers: HashMap::new(),
                     our: our.clone(),
                     kv: kv.clone(),
+                    default_config,
                 };
                 new_state.save_state()?;
                 new_state
@@ -55,19 +69,43 @@ impl Pub {
         Ok(pub_instance)
     }
 
+    /// Loads the state of the `Pub` instance from the key-value store.
+    ///
+    /// # Arguments
+    ///
+    /// * `kv` - The key-value store to load from.
+    ///
+    /// # Returns
+    ///
+    /// A `Result` containing the loaded `Pub` instance or an error.
     fn load_state(kv: &Kv<String, Vec<u8>>) -> Result<Self> {
         let state = kv.get(&"state".to_string())?;
         let pubsub: Self = serde_json::from_slice(&state)?;
         Ok(pubsub)
     }
 
+    /// Saves the current state of the `Pub` instance to the key-value store.
+    ///
+    /// # Returns
+    ///
+    /// A `Result` indicating success or an error.
     fn save_state(&self) -> Result<()> {
         let state = serde_json::to_vec(&self)?;
         self.kv.set(&"state".to_string(), &state, None)?;
         Ok(())
     }
 
-    pub fn new_topic(&mut self, topic: &str, config: PubConfig) -> Result<(), PubError> {
+    /// Creates a new topic with the given configuration or uses the default.
+    ///
+    /// # Arguments
+    ///
+    /// * `topic` - The name of the new topic.
+    /// * `config` - An optional configuration for the new topic. If None, uses the default.
+    ///
+    /// # Returns
+    ///
+    /// A `Result` indicating success or a `PubError`.
+    pub fn new_topic(&mut self, topic: &str, config: Option<PubConfig>) -> Result<(), PubError> {
         // spawn new publisher process
 
         // TODO: implement more granular capabilities, not just passing all from parent.
@@ -84,6 +122,8 @@ impl Pub {
         )
         .map_err(|e| PubError::SpawningError(e.to_string()))?;
         let publisher_address = Address::new(self.our.node.clone(), process);
+
+        let config = config.unwrap_or(self.default_config.clone());
 
         // send pub info to new process
         let init_pub_request = InitPubRequest {
@@ -104,10 +144,29 @@ impl Pub {
         Ok(())
     }
 
+    /// Retrieves the publisher for a given topic.
+    ///
+    /// # Arguments
+    ///
+    /// * `topic` - The name of the topic.
+    ///
+    /// # Returns
+    ///
+    /// An `Option` containing a reference to the `Publisher` if found, or `None`.
     pub fn get_topic(&self, topic: &str) -> Option<&Publisher> {
         self.publishers.get(topic)
     }
 
+    /// Publishes a message to a specific topic, creating the topic if it doesn't exist.
+    ///
+    /// # Arguments
+    ///
+    /// * `topic` - The name of the topic to publish to.
+    /// * `message` - The message to publish.
+    ///
+    /// # Returns
+    ///
+    /// A `Result` indicating success or a `PubError`.
     pub fn publish(&mut self, topic: &str, message: &[u8]) -> Result<(), PubError> {
         if let Some(publisher) = self.publishers.get(topic) {
             let publish_message = PubRequest::Publish(PublishRequest {
@@ -126,13 +185,22 @@ impl Pub {
             // if you already don't have a publisher, do we spawn one?
             // leads to default config... which might not be what you want.
             // default config could also be stored and set in the api!
-            self.new_topic(topic, PubConfig::default())?;
+            self.new_topic(topic, None)?;
             self.publish(topic, message)?;
             // NOTE: this could be a topic.publish instead! to avoid infinite loops or something..?
             Ok(())
         }
     }
 
+    /// Removes a topic and its associated publisher.
+    ///
+    /// # Arguments
+    ///
+    /// * `topic` - The name of the topic to remove.
+    ///
+    /// # Returns
+    ///
+    /// A `Result` indicating success or a `PubError`.
     pub fn remove_topic(&mut self, topic: &str) -> Result<(), PubError> {
         if let Some(publisher) = self.publishers.get(topic) {
             let req = PubRequest::Kill;
@@ -142,6 +210,7 @@ impl Pub {
     }
 }
 
+/// Default implementation for PubConfig.
 impl Default for PubConfig {
     fn default() -> Self {
         PubConfig {
@@ -153,29 +222,40 @@ impl Default for PubConfig {
     }
 }
 
-#[derive(Debug, Serialize, Deserialize)]
+/// Represents a subscriber in the pub-sub system.
+#[derive(Debug, Serialize, Deserialize, Clone)]
 #[allow(unused)]
 pub struct Sub {
-    subscriptions: HashMap<Subscription, Subscriber>, // (publisher, topic) -> sequence (do we need this)
+    subscriptions: HashMap<Subscription, Subscriber>,
     our: Address,
     kv: Kv<String, Vec<u8>>,
-    // could also have topic -> (publisher, sequence)
 }
 
+/// Represents a unique subscription identified by publisher and topic.
 #[derive(Debug, Clone, Serialize, Deserialize, Eq, PartialEq, Hash)]
 pub struct Subscription {
-    publisher: Address, // publisher worker address
+    publisher: Address,
     topic: String,
 }
 
+/// Metadata for a specific subscriber.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct Subscriber {
-    address: Address,     // subscriber workers address
-    latest_sequence: u64, // latest sequence number received (pain to keep up to date?) would need manual macro for user not to implement.
+    address: Address,
+    latest_sequence: u64,
 }
 
 #[allow(unused)]
 impl Sub {
+    /// Creates a new `Sub` instance.
+    ///
+    /// # Arguments
+    ///
+    /// * `our` - The address of the current process.
+    ///
+    /// # Returns
+    ///
+    /// A `Result` containing the new `Sub` instance or an error.
     pub fn new(our: &Address) -> Result<Self> {
         let db_name = format!("sub-{}", &our.process);
         let kv: Kv<String, Vec<u8>> = kv::open(our.package_id(), &db_name, None)?;
@@ -199,18 +279,44 @@ impl Sub {
         Ok(sub_instance)
     }
 
+    /// Loads the state of the `Sub` instance from the key-value store.
+    ///
+    /// # Arguments
+    ///
+    /// * `kv` - The key-value store to load from.
+    ///
+    /// # Returns
+    ///
+    /// A `Result` containing the loaded `Sub` instance or an error.
     fn load_state(kv: &Kv<String, Vec<u8>>) -> Result<Self> {
         let state = kv.get(&"state".to_string())?;
         let sub: Self = serde_json::from_slice(&state)?;
         Ok(sub)
     }
 
+    /// Saves the current state of the `Sub` instance to the key-value store.
+    ///
+    /// # Returns
+    ///
+    /// A `Result` indicating success or an error.
     fn save_state(&self) -> Result<()> {
         let state = serde_json::to_vec(&self)?;
         self.kv.set(&"state".to_string(), &state, None)?;
         Ok(())
     }
 
+    /// Subscribes to a topic from a specific sequence number.
+    ///
+    /// # Arguments
+    ///
+    /// * `topic` - The name of the topic to subscribe to.
+    /// * `publisher_pkg` - The package ID of the publisher.
+    /// * `node` - The node of the publisher.
+    /// * `sequence` - The optional sequence number to start from.
+    ///
+    /// # Returns
+    ///
+    /// A `Result` indicating success or a `SubError`.
     pub fn subscribe_from<T: Into<PackageId>>(
         &mut self,
         topic: &str,
@@ -288,6 +394,17 @@ impl Sub {
         Ok(())
     }
 
+    /// Subscribes to a topic from the latest available message.
+    ///
+    /// # Arguments
+    ///
+    /// * `topic` - The name of the topic to subscribe to.
+    /// * `publisher_pkg` - The package ID of the publisher.
+    /// * `node` - The node of the publisher.
+    ///
+    /// # Returns
+    ///
+    /// A `Result` indicating success or a `SubError`.
     pub fn subscribe<T: Into<PackageId>>(
         &mut self,
         topic: &str,
@@ -297,6 +414,17 @@ impl Sub {
         self.subscribe_from(topic, publisher_pkg, node, None)
     }
 
+    /// Unsubscribes from a topic.
+    ///
+    /// # Arguments
+    ///
+    /// * `topic` - The name of the topic to unsubscribe from.
+    /// * `publisher_pkg` - The package ID of the publisher.
+    /// * `node` - The node of the publisher.
+    ///
+    /// # Returns
+    ///
+    /// A `Result` indicating success or a `SubError`.
     pub fn unsubscribe<T: Into<PackageId>>(
         &mut self,
         topic: &str,
@@ -334,7 +462,7 @@ impl Sub {
     }
 }
 
-// Error types
+/// Errors that can occur in the subscriber operations.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub enum SubError {
     SpawningError(String),
@@ -345,6 +473,7 @@ pub enum SubError {
     UnsubscribeError(String),
 }
 
+/// Errors that can occur in the publisher operations.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub enum PubError {
     TopicNotFound,
